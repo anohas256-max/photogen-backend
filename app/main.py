@@ -21,7 +21,6 @@ from sqlalchemy.orm import Session
 
 from openai import OpenAI
 
-# наши модули с БД и схемами
 from . import db, models, schemas, crud
 
 
@@ -44,7 +43,6 @@ app = FastAPI(
     version="1.0.0",
 )
 
-# CORS для Flutter
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -52,7 +50,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# создаём таблицы, если их ещё нет
 models.Base.metadata.create_all(bind=db.engine)
 
 
@@ -70,6 +67,40 @@ class GenerationResponse(BaseModel):
     generated_image: list[int] | None = None
 
 
+# ---------- ВСПОМОГАТЕЛЬНЫЙ ПАРСЕР JSON ОТ МОДЕЛИ ----------
+
+
+def _parse_model_json(raw_text: str) -> dict:
+    """
+    Пытаемся выжать валидный JSON даже если модель
+    вернула его в ```блоке``` или с префиксами/суффиксами.
+    """
+    text = raw_text.strip()
+
+    # 1) убираем ```json ... ``` если есть
+    if text.startswith("```"):
+        parts = text.split("```")
+        # чаще всего JSON внутри второго блока
+        for part in parts:
+            part = part.strip()
+            if part.startswith("{") and part.endswith("}"):
+                text = part
+                break
+
+    # 2) если всё ещё не с { ... } — вырезаем от первого { до последней }
+    if not (text.startswith("{") and text.endswith("}")):
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            text = text[start : end + 1]
+
+    # 3) финальная попытка распарсить
+    try:
+        return json.loads(text)
+    except Exception as e:
+        raise ValueError(f"Модель вернула невалидный JSON: {e}. Текст: {raw_text!r}")
+
+
 # ---------- /health ----------
 
 
@@ -78,7 +109,7 @@ def health():
     return {"status": "ok"}
 
 
-# ---------- /generate (Create + AI + запись в БД) ----------
+# ---------- /generate ----------
 
 
 @app.post("/generate", response_model=GenerationResponse)
@@ -90,8 +121,8 @@ async def generate(
     db_session: Session = Depends(get_db),
 ):
     """
-    Генерация описания и тегов по загруженному изображению (OpenAI gpt-4o-mini).
-    ПЛЮС создаём записи Photo и Generation в БД (Create).
+    Генерация описания и тегов по загруженному изображению (OpenAI gpt-4o-mini)
+    + запись Photo и Generation в БД.
     """
 
     if not image.content_type or not image.content_type.startswith("image/"):
@@ -100,23 +131,31 @@ async def generate(
             detail="Нужно отправить файл-изображение",
         )
 
-    # читаем байты изображения
     image_bytes = await image.read()
 
-    # кодируем в base64 для OpenAI (data-url)
     b64_image = base64.b64encode(image_bytes).decode("utf-8")
     data_url = f"data:{image.content_type};base64,{b64_image}"
 
-    # подсказка по длине текста
+    # --- подсказка по длине ---
     if length == "Short":
         length_hint = (
             "Для текущего параметра длины ('Short') напиши строго 1–2 коротких предложения."
+        )
+    elif length == "Medium":
+        length_hint = (
+            "Для текущего параметра длины ('Medium') напиши примерно 5–6 предложений."
         )
     elif length == "Long":
         length_hint = (
             "Для текущего параметра длины ('Long') напиши примерно 10–15 предложений."
         )
+    elif length == "VeryLong":
+        length_hint = (
+            "Для текущего параметра длины ('VeryLong') напиши большой рассказ "
+            "объёмом не меньше 40 предложений (можно 40–60), текст должен быть связным."
+        )
     else:
+        # на всякий случай дефолтим
         length = "Medium"
         length_hint = (
             "Для текущего параметра длины ('Medium') напиши примерно 5–6 предложений."
@@ -135,36 +174,44 @@ async def generate(
 Язык:
 - Пиши по-русски.
 
-Стили описания:
+Стили описания (поле style):
 - Default      — нейтральное, обычное описание.
 - Art          — более художественное, образное, с эмоциями.
 - Realistic    — сухое, фактическое, как техническое описание.
-- Soft         — мягкое, дружелюбное, слегка "маркетинговое".
 - Scientific   — как в научной/технической статье, с точными терминами.
 - Informative  — максимально информативно: что изображено, из чего состоит,
                  где используется, какие важные детали.
 - Funny        — максимально весёлое и абсурдное описание с гиперболами,
                  шутками и мемными фразами, но всё равно основанное на том,
                  что реально есть на изображении, без мата.
+- Dialogue     — рассказ, где большая часть текста — диалоги персонажей.
+                 Используй формат реплик с тире, можно добавлять авторские
+                 вставки между диалогами.
 
-Длина описания:
-- Short  — 1–2 предложения.
-- Medium — 5–6 предложений.
-- Long   — 10–15 предложений.
+Длина описания (поле length):
+- Short      — 1–2 предложения.
+- Medium     — 5–6 предложений.
+- Long       — 10–15 предложений.
+- VeryLong   — большой рассказ (40+ предложений).
+
+{length_hint}
 
 Дополнительные указания для стиля Funny:
 - используй преувеличения, неожиданные сравнения и лёгкий абсурд;
 - можно аккуратно вставлять популярные мемные выражения без мата;
 - описание всё равно должно быть связано с содержимым картинки.
 
-{length_hint}
+Дополнительные указания для стиля Dialogue:
+- делай упор на диалог персонажей, как сцена из фильма или визуальной новеллы;
+- реплики начинай с тире;
+- можно добавить немного описаний между репликами, чтобы связать сцену.
 
 ВАЖНО:
 - Не используй фразы вроде:
   "на изображении показано", "на фото видно", "на картинке представлено",
   "изображён/представлен" и т.п.
   Сразу начинай с описания сцены или объекта.
-- Описание должно быть связным и логичным, без воды.
+- Описание должно быть связным и логичным.
 
 Теги:
 - Должно быть РОВНО {tags_count} тегов.
@@ -179,7 +226,6 @@ async def generate(
 """
 
     try:
-        # запрос к OpenAI (официальный responses API)
         response = client.responses.create(
             model="gpt-4o-mini",
             input=[
@@ -191,21 +237,17 @@ async def generate(
                     ],
                 }
             ],
-            max_output_tokens=400,
+            max_output_tokens=2000,
         )
 
         raw_text = response.output_text
 
-        # пытаемся распарсить JSON
+        # более устойчивый парсер
         try:
-            data = json.loads(raw_text)
-        except Exception:
-            start = raw_text.find("{")
-            end = raw_text.rfind("}")
-            if start == -1 or end == -1:
-                raise ValueError("Модель вернула не JSON")
-            cleaned = raw_text[start : end + 1]
-            data = json.loads(cleaned)
+            data = _parse_model_json(raw_text)
+        except Exception as e:
+            # пробрасываем как 500, чтобы в приложении было понятно
+            raise HTTPException(status_code=500, detail=f"Модель вернула не JSON: {e}")
 
         description = data.get("description", "")
         tags = data.get("tags", [])
@@ -214,14 +256,11 @@ async def generate(
             tags = []
 
         # --------- ЧАСТЬ CRUD: СОХРАНЯЕМ В БД ---------
-
-        # 1) создаём Photo
         photo = crud.create_photo(
             db_session,
-            file_path="generated_via_openai",  # можно потом заменить реальным путём
+            file_path="generated_via_openai",
         )
 
-        # 2) создаём Generation, связанный с этим фото
         gen_in = schemas.GenerationCreate(
             photo_id=photo.id,
             description=description,
@@ -232,13 +271,15 @@ async def generate(
         )
         crud.create_generation(db_session, gen_in)
 
-        # 3) отдаём ответ Flutter'у
         return GenerationResponse(
             description=description,
             tags=tags,
             generated_image=None,
         )
 
+    except HTTPException:
+        # уже оформленная ошибка
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"OpenAI error: {e}")
 
@@ -299,7 +340,6 @@ def create_generation(
     data: schemas.GenerationCreate,
     db_session: Session = Depends(get_db),
 ):
-    # проверяем, что фото существует
     photo = crud.get_photo(db_session, data.photo_id)
     if not photo:
         raise HTTPException(status_code=400, detail="Photo not found")
