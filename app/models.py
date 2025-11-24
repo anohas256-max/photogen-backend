@@ -1,4 +1,6 @@
 # app/models.py
+import json
+
 from sqlalchemy import (
     Column,
     Integer,
@@ -8,10 +10,32 @@ from sqlalchemy import (
     ForeignKey,
     func,
 )
-from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import relationship
+from sqlalchemy.types import TypeDecorator
 
 from .db import Base
+
+
+class StringArray(TypeDecorator):
+    """
+    Универсальный тип: list[str] <-> TEXT (JSON).
+    Работает и с SQLite, и с Postgres.
+    Для остального кода tags остаётся обычным списком строк.
+    """
+    impl = Text
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        # Python -> БД
+        if value is None:
+            return None
+        return json.dumps(value, ensure_ascii=False)
+
+    def process_result_value(self, value, dialect):
+        # БД -> Python
+        if value is None:
+            return None
+        return json.loads(value)
 
 
 class Photo(Base):
@@ -44,7 +68,8 @@ class Generation(Base):
     )
 
     description = Column(Text, nullable=False)
-    tags = Column(ARRAY(String), nullable=False)  # массив тегов
+    # ВАЖНО: раньше было ARRAY(String), теперь наш кросс-БД тип
+    tags = Column(StringArray, nullable=False)  # массив тегов
     style = Column(String(50), nullable=False)
     length = Column(String(20), nullable=False)
     tags_count = Column(Integer, nullable=False)
