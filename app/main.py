@@ -80,7 +80,6 @@ def _parse_model_json(raw_text: str) -> dict:
     # 1) убираем ```json ... ``` если есть
     if text.startswith("```"):
         parts = text.split("```")
-        # чаще всего JSON внутри второго блока
         for part in parts:
             part = part.strip()
             if part.startswith("{") and part.endswith("}"):
@@ -155,11 +154,26 @@ async def generate(
             "объёмом не меньше 40 предложений (можно 40–60), текст должен быть связным."
         )
     else:
-        # на всякий случай дефолтим
         length = "Medium"
         length_hint = (
             "Для текущего параметра длины ('Medium') напиши примерно 5–6 предложений."
         )
+
+    # --- блок про теги: если 0, просим пустой массив ---
+    if tags_count <= 0:
+        tags_instruction = """
+Теги:
+- Поле "tags" в JSON должно быть пустым массивом [].
+- Не добавляй никаких тегов, просто верни "tags": [].
+"""
+    else:
+        tags_instruction = f"""
+Теги:
+- Должно быть РОВНО {tags_count} тегов.
+- Теги — отдельные слова или короткие фразы.
+- Без решеток (#) и без запятых внутри тегов.
+- Теги должны точно соответствовать объектам и смыслу сцены.
+"""
 
     system_instruction = f"""
 Ты — помощник приложения PhotoGen.
@@ -213,11 +227,7 @@ async def generate(
   Сразу начинай с описания сцены или объекта.
 - Описание должно быть связным и логичным.
 
-Теги:
-- Должно быть РОВНО {tags_count} тегов.
-- Теги — отдельные слова или короткие фразы.
-- Без решеток (#) и без запятых внутри тегов.
-- Теги должны точно соответствовать объектам и смыслу сцены.
+{tags_instruction}
 
 Текущие параметры запроса:
 - Стиль: {style}
@@ -242,14 +252,13 @@ async def generate(
 
         raw_text = response.output_text
 
-        # более устойчивый парсер
+        # устойчивый парсер
         try:
             data = _parse_model_json(raw_text)
         except Exception as e:
-            # пробрасываем как 500, чтобы в приложении было понятно
             raise HTTPException(status_code=500, detail=f"Модель вернула не JSON: {e}")
 
-        description = data.get("description", "")
+        description = data.get("description", "") or ""
         tags = data.get("tags", [])
 
         if not isinstance(tags, list):
@@ -278,7 +287,6 @@ async def generate(
         )
 
     except HTTPException:
-        # уже оформленная ошибка
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"OpenAI error: {e}")
