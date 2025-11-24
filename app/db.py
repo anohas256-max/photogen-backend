@@ -1,24 +1,36 @@
+import os
+
 from sqlalchemy import create_engine
-from sqlalchemy.engine import URL
 from sqlalchemy.orm import sessionmaker, declarative_base
+from dotenv import load_dotenv
 
-# ⚠️ ВПИШИ В ТАКОМ ВИДЕ — БЕЗ КАВЫЧЕК, ПРОБЕЛОВ, РУССКИХ СИМВОЛОВ
+# Загружаем .env локально (на Render его просто не будет — это не страшно)
+load_dotenv()
 
-DB_USER = "postgres"
-DB_PASSWORD = "pg12345"   # твой пароль
-DB_HOST = "localhost"
-DB_PORT = 5433            # ВАЖНО — ИМЕННО 5433, как на твоём скрине!
-DB_NAME = "photogen_db"
+# 1) Пытаемся взять строку подключения из переменной окружения
+DATABASE_URL = os.getenv("DATABASE_URL")
 
-DATABASE_URL = URL.create(
-    drivername="postgresql+pg8000",
-    username=DB_USER,
-    password=DB_PASSWORD,
-    host=DB_HOST,
-    port=DB_PORT,
-    database=DB_NAME,
-)
+# 2) Если переменная не задана (например, у тебя локально) — используем старый Postgres-конфиг
+if not DATABASE_URL:
+    from sqlalchemy.engine import URL
 
+    # ⚠️ тут всё как у тебя было
+    DB_USER = "postgres"
+    DB_PASSWORD = "pg12345"
+    DB_HOST = "localhost"
+    DB_PORT = 5433
+    DB_NAME = "photogen_db"
+
+    DATABASE_URL = URL.create(
+        drivername="postgresql+pg8000",
+        username=DB_USER,
+        password=DB_PASSWORD,
+        host=DB_HOST,
+        port=DB_PORT,
+        database=DB_NAME,
+    )
+
+# 3) Создаём engine по строке подключения (это может быть и postgres://, и sqlite:///)
 engine = create_engine(
     DATABASE_URL,
     echo=True,
